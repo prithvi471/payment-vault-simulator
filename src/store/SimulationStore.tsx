@@ -36,6 +36,13 @@ export const SimulationProvider: React.FC<{children: React.ReactNode}> = ({ chil
   const [liquidityPool, setLiquidityPool] = useState<LiquidityPool>({
     balance: 50000
   });
+
+  // Track borrowed money from liquidity pool for each bank
+  const [borrowedAmounts, setBorrowedAmounts] = useState<Record<string, number>>({
+    "A": 0,
+    "B": 0,
+    "C": 0
+  });
   
   const [transactions, setTransactions] = useState<Transaction[]>([]);
 
@@ -64,15 +71,65 @@ export const SimulationProvider: React.FC<{children: React.ReactNode}> = ({ chil
     setTransactions(prev => [newTransaction, ...prev]);
   };
 
+  // Rebalance funds when a bank comes back online
+  const rebalanceFunds = (bankId: string) => {
+    const borrowedAmount = borrowedAmounts[bankId];
+    if (borrowedAmount <= 0) return;
+    
+    // Find the bank
+    const bank = banks.find(b => b.id === bankId);
+    if (!bank) return;
+    
+    // Update the bank's balance and the liquidity pool
+    setBanks(prevBanks => 
+      prevBanks.map(b => 
+        b.id === bankId
+          ? { ...b, balance: b.balance - borrowedAmount }
+          : b
+      )
+    );
+    
+    setLiquidityPool(prev => ({
+      balance: prev.balance + borrowedAmount
+    }));
+    
+    // Reset the borrowed amount for this bank
+    setBorrowedAmounts(prev => ({
+      ...prev,
+      [bankId]: 0
+    }));
+    
+    // Add rebalance transaction to the log
+    addTransaction(
+      'REBALANCE',
+      borrowedAmount,
+      `Rebalanced ₹${borrowedAmount.toLocaleString()} from ${bank.name} back to Liquidity Pool`
+    );
+    
+    toast.info(`Rebalanced Funds`, {
+      description: `₹${borrowedAmount.toLocaleString()} returned to Liquidity Pool from ${bank.name}`
+    });
+  };
+
   // Toggle a bank's status
   const toggleBankStatus = (bankId: string) => {
-    setBanks(prevBanks => 
-      prevBanks.map(bank => 
+    setBanks(prevBanks => {
+      const updatedBanks = prevBanks.map(bank => 
         bank.id === bankId 
           ? { ...bank, status: bank.status === 'UP' ? 'DOWN' : 'UP' } 
           : bank
-      )
-    );
+      );
+      
+      const bank = updatedBanks.find(b => b.id === bankId);
+      
+      // If the bank is coming back online, rebalance funds
+      if (bank && bank.status === 'UP') {
+        // We'll rebalance after state update
+        setTimeout(() => rebalanceFunds(bankId), 0);
+      }
+      
+      return updatedBanks;
+    });
     
     const bank = banks.find(b => b.id === bankId);
     if (bank) {
@@ -185,6 +242,7 @@ export const SimulationProvider: React.FC<{children: React.ReactNode}> = ({ chil
     const withdrawalDetails: string[] = [];
     const updatedBanks = [...banks];
     let liquidityUsed = 0;
+    let liquidityBorrowedDetails: Record<string, number> = {};
 
     // First try to withdraw from active banks
     for (const bank of updatedBanks.filter(b => b.status === 'UP')) {
@@ -198,12 +256,56 @@ export const SimulationProvider: React.FC<{children: React.ReactNode}> = ({ chil
       }
     }
 
-    // If we couldn't get enough from active banks, use liquidity pool for remaining amount
-    if (remainingAmount > 0 && liquidityPool.balance >= remainingAmount) {
-      liquidityUsed = remainingAmount;
-      setLiquidityPool(prev => ({ balance: prev.balance - remainingAmount }));
-      withdrawalDetails.push(`₹${remainingAmount.toLocaleString()} from Liquidity Pool`);
-      remainingAmount = 0;
+    // If we still need funds and have down banks with deposits, use liquidity pool
+    if (remainingAmount > 0) {
+      // Find down banks that have deposits
+      const downBanks = banks.filter(bank => bank.status === 'DOWN');
+      
+      // Check user deposits in down banks
+      const user = users[0];
+      
+      for (const bank of downBanks) {
+        if (remainingAmount <= 0) break;
+        
+        // Find if user has deposits in this down bank
+        const userDeposit = user.deposits.find(d => d.bankId === bank.id);
+        
+        if (userDeposit && userDeposit.amount > 0) {
+          // Calculate how much we can take from this bank's deposits
+          const amountFromBank = Math.min(userDeposit.amount, remainingAmount);
+          
+          if (amountFromBank > 0 && liquidityPool.balance >= amountFromBank) {
+            liquidityUsed += amountFromBank;
+            remainingAmount -= amountFromBank;
+            
+            // Track which down bank this liquidity is covering for
+            liquidityBorrowedDetails[bank.id] = (liquidityBorrowedDetails[bank.id] || 0) + amountFromBank;
+            
+            withdrawalDetails.push(`₹${amountFromBank.toLocaleString()} from Liquidity Pool (for ${bank.name})`);
+          }
+        }
+      }
+      
+      // Use general liquidity for any remaining amount
+      if (remainingAmount > 0 && liquidityPool.balance >= remainingAmount) {
+        liquidityUsed += remainingAmount;
+        withdrawalDetails.push(`₹${remainingAmount.toLocaleString()} from Liquidity Pool (general)`);
+        remainingAmount = 0;
+      }
+      
+      // Update liquidity pool balance
+      if (liquidityUsed > 0) {
+        setLiquidityPool(prev => ({ balance: prev.balance - liquidityUsed }));
+        
+        // Update borrowed amounts tracking
+        setBorrowedAmounts(prev => {
+          const updated = { ...prev };
+          Object.keys(liquidityBorrowedDetails).forEach(bankId => {
+            updated[bankId] += liquidityBorrowedDetails[bankId];
+          });
+          return updated;
+        });
+      }
     }
 
     // Update bank balances
@@ -220,15 +322,9 @@ export const SimulationProvider: React.FC<{children: React.ReactNode}> = ({ chil
           const bank = banks.find(b => b.id === deposit.bankId);
           if (!bank || userAmountToWithdraw <= 0) return deposit;
           
-          // If bank is UP, withdraw normally
-          if (bank.status === 'UP') {
-            const withdrawAmount = Math.min(deposit.amount, userAmountToWithdraw);
-            userAmountToWithdraw -= withdrawAmount;
-            return { ...deposit, amount: deposit.amount - withdrawAmount };
-          }
-          
-          // If bank is DOWN, we'll handle this through the liquidity pool
-          return deposit;
+          const withdrawAmount = Math.min(deposit.amount, userAmountToWithdraw);
+          userAmountToWithdraw -= withdrawAmount;
+          return { ...deposit, amount: deposit.amount - withdrawAmount };
         })
         .filter(deposit => deposit.amount > 0); // Remove zero balance deposits
       
@@ -243,11 +339,16 @@ export const SimulationProvider: React.FC<{children: React.ReactNode}> = ({ chil
     );
     
     if (liquidityUsed > 0) {
-      addTransaction(
-        'FAILOVER',
-        liquidityUsed,
-        `Used ₹${liquidityUsed.toLocaleString()} from Liquidity Pool due to bank unavailability`
-      );
+      Object.entries(liquidityBorrowedDetails).forEach(([bankId, borrowedAmount]) => {
+        if (borrowedAmount > 0) {
+          const bank = banks.find(b => b.id === bankId);
+          addTransaction(
+            'FAILOVER',
+            borrowedAmount,
+            `Used ₹${borrowedAmount.toLocaleString()} from Liquidity Pool for ${bank ? bank.name : 'Bank ' + bankId} (DOWN)`
+          );
+        }
+      });
     }
     
     toast.success(`Withdrew ₹${amount.toLocaleString()}`, {
