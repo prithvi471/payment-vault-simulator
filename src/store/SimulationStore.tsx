@@ -103,6 +103,18 @@ export const SimulationProvider: React.FC<{children: React.ReactNode}> = ({ chil
       return;
     }
 
+    // First, add the full amount to the liquidity pool
+    setLiquidityPool(prev => ({
+      balance: prev.balance + amount
+    }));
+
+    // Add transaction for transfer to liquidity pool
+    addTransaction(
+      'DEPOSIT',
+      amount,
+      `Added ₹${amount.toLocaleString()} to Liquidity Pool`
+    );
+
     // Calculate amount per bank
     const availableBanks = activeBanks.slice(0, numBanks);
     const amountPerBank = Math.floor(amount / numBanks);
@@ -142,16 +154,16 @@ export const SimulationProvider: React.FC<{children: React.ReactNode}> = ({ chil
       });
     });
     
-    // Add transaction log
+    // Add transaction log for distribution to banks
     const bankNames = availableBanks.map(bank => bank.name).join(', ');
     addTransaction(
       'DEPOSIT',
       amount,
-      `Deposited ₹${amount.toLocaleString()} across ${bankNames}`
+      `Distributed ₹${amount.toLocaleString()} from Liquidity Pool across ${bankNames}`
     );
     
     toast.success(`Deposited ₹${amount.toLocaleString()}`, {
-      description: `Split across ${availableBanks.length} banks`
+      description: `First transferred to Liquidity Pool, then split across ${availableBanks.length} banks`
     });
   };
 
