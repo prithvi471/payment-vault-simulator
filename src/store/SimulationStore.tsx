@@ -1,4 +1,3 @@
-
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { Bank, User, LiquidityPool, Transaction, BankStatus, Deposit } from '@/types';
 import { toast } from 'sonner';
@@ -116,7 +115,7 @@ export const SimulationProvider: React.FC<{children: React.ReactNode}> = ({ chil
     setBanks(prevBanks => {
       const updatedBanks = prevBanks.map(bank => 
         bank.id === bankId 
-          ? { ...bank, status: bank.status === 'UP' ? 'DOWN' : 'UP' } 
+          ? { ...bank, status: bank.status === 'UP' ? 'DOWN' as BankStatus : 'UP' as BankStatus } 
           : bank
       );
       
